@@ -78,7 +78,9 @@ android {
 
     lint {
         // The module has separate Android 16/HyperOS 3 and Android 17/HyperOS 4 adapters.
+        // Hook code runs inside system_server, where hidden-API restrictions do not apply.
         disable += setOf(
+            "BlockedPrivateApi",
             "ChromeOsAbiSupport",
             "DiscouragedPrivateApi",
             "GradleDependency",
