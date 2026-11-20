@@ -1,0 +1,3 @@
+-keep class io.github.skinight.focuspenpointer.hook.** { *; }
+-keep class io.github.skinight.focuspenpointer.shell.** { *; }
+-keep class io.github.skinight.focuspenpointer.config.ConfigProvider { *; }

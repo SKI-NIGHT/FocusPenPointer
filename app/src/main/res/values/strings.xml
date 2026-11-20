@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">FocusPen Pointer</string>
+    <string name="xposed_description">把小米焦点触控笔 Pro 变成隔空指针：捏笔就是一根手指</string>
+    <string-array name="xposed_scope">
+        <item>android</item>
+    </string-array>
+</resources>

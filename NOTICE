@@ -1,0 +1,12 @@
+FocusPen Pointer
+Copyright (C) 2026 SKI-NIGHT
+
+This project is a derivative work of FocusPen Pro X
+(https://github.com/HMQYHM/FocusPenProX), Copyright (C) 2026 HMQYHM,
+licensed under the GNU General Public License v3.0 only.
+
+FocusPen Pointer is distributed under the same license (GPL-3.0-only).
+It started from FocusPen Pro X 0.11.0 and has since been substantially rewritten:
+the input model, pointer pipeline, hook architecture and configuration differ from
+the original. Portions of the original code (configuration UI, LSPosed integration,
+vendor laser hooks) remain and are used under the terms of the GPL.
