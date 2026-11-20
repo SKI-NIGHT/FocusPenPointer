@@ -17,8 +17,9 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Xiaomi reacts to the first pinch immediately, while multi-pinch gestures can only be
  * recognised after the tap window. When any of them is configured, the pinch stream is kept
- * from Xiaomi; the first tap is buffered and replayed to Xiaomi once the window closes
- * without a gesture, so its own single pinch keeps working (slightly delayed).
+ * from Xiaomi; every pinch of the sequence is buffered and, once the window closes without
+ * one of our gestures, replayed to Xiaomi with its original spacing. Xiaomi's own single and
+ * double pinches (e.g. in Notes) therefore keep working, slightly delayed.
  */
 internal class OffLaserGestures(
     private val worker: Handler,
@@ -37,11 +38,14 @@ internal class OffLaserGestures(
 
     private val replaying = AtomicBoolean(false)
     private val holdAwaitingRelease = AtomicBoolean(false)
+    /** Down times of the clean pinch copies we injected for the app. */
+    private val cleanTapDownTimes = ArrayDeque<Long>()
+
     private val replayLock = Any()
-    private var replayDown: KeyEvent? = null
-    private var replayUp: KeyEvent? = null
+    private val buffered = ArrayList<BufferedKey>()
     private var replayInteractive = false
     private var replayTask: Runnable? = null
+    private var replayGeneration = 0
 
     private val detector = HierarchicalTapHoldDetector(
         maxTaps = 4,
@@ -74,9 +78,59 @@ internal class OffLaserGestures(
         }
         val snapshot = config()
         if (snapshot.blocksAllHooks(foreground())) return false
-        val consume = snapshot.enabled && (globalGesturesEnabled(snapshot) || normalGesturesEnabled(snapshot))
+        val consume = snapshot.enabled &&
+            (globalGesturesEnabled(snapshot) || normalGesturesEnabled(snapshot)) &&
+            vendorShowsShortcutPanel()
         if (consume) bufferForReplay(event, interactive)
         return consume
+    }
+
+    /**
+     * When Xiaomi passes pinches on to the app (any function but the shortcut panel), a held
+     * pinch would reach it as a stream of key repeats and e.g. flip brush and eraser over and
+     * over. Instead the real key is swallowed and the app gets one clean press-and-release
+     * copy the moment the pinch goes down. Returns true when the real event is swallowed.
+     */
+    private fun passToAppAsCleanTap(event: KeyEvent, snapshot: ModuleConfig): Boolean {
+        if (!snapshot.enabled || snapshot.blocksAllHooks(foreground()) || vendorShowsShortcutPanel()) {
+            return false
+        }
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            val now = android.os.SystemClock.uptimeMillis()
+            val down = KeyEvent(
+                now, now, KeyEvent.ACTION_DOWN, event.keyCode, 0, event.metaState,
+                event.deviceId, event.scanCode, event.flags, event.source,
+            )
+            val up = KeyEvent.changeAction(KeyEvent.changeTimeRepeat(down, now + 1, 0), KeyEvent.ACTION_UP)
+            synchronized(cleanTapDownTimes) {
+                cleanTapDownTimes.addLast(now)
+                while (cleanTapDownTimes.size > 4) cleanTapDownTimes.removeFirst()
+            }
+            // Inject outside this key callback.
+            worker.post {
+                if (!executor.injectEvent(down) || !executor.injectEvent(up)) {
+                    report.event("轻捏转交应用失败")
+                }
+            }
+        }
+        return true
+    }
+
+    private fun isCleanTapCopy(event: KeyEvent): Boolean =
+        synchronized(cleanTapDownTimes) { event.downTime in cleanTapDownTimes }
+
+    /**
+     * Only the "shortcut panel" pinch function is handled by Xiaomi itself (it pops the
+     * panel up on the first pinch, so we hold pinches back). With any other function (e.g.
+     * switching brush and eraser) Xiaomi passes the key on to the app, which must get it
+     * untouched: a replay through the vendor hook would never reach the app.
+     */
+    private fun vendorShowsShortcutPanel(): Boolean {
+        val manager = touchFilmManager.get() ?: return true
+        return runCatching {
+            Xp.getIntField(manager, "mCurrentPinchFunction") == PINCH_FUNCTION_SHORTCUT_PANEL &&
+                !Xp.getBooleanField(manager, "mEnableStylusCaseForApp")
+        }.getOrDefault(true)
     }
 
     /**
@@ -94,11 +148,12 @@ internal class OffLaserGestures(
         if (laserEnabled) return null
 
         if (event.scanCode == CompatProfile.SCAN_PINCH_F19) {
+            if (isCleanTapCopy(event)) return false
             if (!snapshot.enabled ||
                 (!globalGesturesEnabled(snapshot) && !normalGesturesEnabled(snapshot))
             ) {
                 detector.reset()
-                return false
+                return passToAppAsCleanTap(event, snapshot)
             }
             when (event.action) {
                 KeyEvent.ACTION_DOWN ->
@@ -108,8 +163,8 @@ internal class OffLaserGestures(
                     detector.onUp(event.eventTime, heldMs)
                 }
             }
-            // Observe only: the vendor side is handled by consumeVendorPinch().
-            return false
+            // The shortcut-panel case is handled inside Xiaomi's hook (consumeVendorPinch).
+            return passToAppAsCleanTap(event, snapshot)
         }
 
         val up = event.keyCode == CompatProfile.KEY_SLIDE_UP
@@ -212,53 +267,58 @@ internal class OffLaserGestures(
         synchronized(replayLock) {
             replayTask?.let(worker::removeCallbacks)
             replayTask = null
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                if (replayDown == null) {
-                    replayDown = KeyEvent(event)
-                    replayInteractive = interactive
+            if (event.repeatCount != 0) return
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (buffered.isEmpty()) replayInteractive = interactive
+                    if (buffered.size < MAX_BUFFERED_KEYS) {
+                        buffered += BufferedKey(KeyEvent(event), android.os.SystemClock.uptimeMillis())
+                    }
                 }
-                return
-            }
-            if (event.action == KeyEvent.ACTION_UP && replayDown != null) {
-                if (replayUp == null) replayUp = KeyEvent(event)
-                val task = Runnable { replayBufferedPinch() }
-                replayTask = task
-                worker.postDelayed(
-                    task,
-                    config().multiClickMs.coerceIn(220L, 600L) + VENDOR_REPLAY_GRACE_MS,
-                )
+                KeyEvent.ACTION_UP -> {
+                    if (buffered.isEmpty()) return
+                    if (buffered.size < MAX_BUFFERED_KEYS) {
+                        buffered += BufferedKey(KeyEvent(event), android.os.SystemClock.uptimeMillis())
+                    }
+                    val task = Runnable { replayBufferedPinches() }
+                    replayTask = task
+                    worker.postDelayed(
+                        task,
+                        config().multiClickMs.coerceIn(220L, 600L) + VENDOR_REPLAY_GRACE_MS,
+                    )
+                }
             }
         }
     }
 
-    private fun replayBufferedPinch() {
-        val pending = synchronized(replayLock) {
-            val down = replayDown
-            val up = replayUp
-            val interactive = replayInteractive
-            replayDown = null
-            replayUp = null
+    /** Hands the buffered pinches back to Xiaomi, keeping their original spacing. */
+    private fun replayBufferedPinches() {
+        val (keys, interactive, generation) = synchronized(replayLock) {
+            val keys = ArrayList(buffered)
+            buffered.clear()
             replayTask = null
-            if (down == null || up == null) null else Triple(down, up, interactive)
-        } ?: return
+            Triple(keys, replayInteractive, ++replayGeneration)
+        }
+        if (keys.isEmpty()) return
         detector.reset()
         val manager = touchFilmManager.get() ?: return
-        replaying.set(true)
-        try {
-            val downResult = runCatching {
-                Xp.callMethod(manager, "interceptKeyBeforeQueueing", pending.first, pending.third)
-            }
-            val upResult = runCatching {
-                Xp.callMethod(manager, "interceptKeyBeforeQueueing", pending.second, pending.third)
-            }
-            if (downResult.isSuccess && upResult.isSuccess) {
-                report.event("单击未形成四击 → 已恢复小米快捷环事件")
-            } else {
-                downResult.exceptionOrNull()?.let(onError)
-                upResult.exceptionOrNull()?.let(onError)
-            }
-        } finally {
-            replaying.set(false)
+        val start = keys.first().arrivedAt
+        val pinches = keys.count { it.event.action == KeyEvent.ACTION_DOWN }
+        keys.forEachIndexed { index, key ->
+            worker.postDelayed({
+                if (synchronized(replayLock) { generation != replayGeneration }) return@postDelayed
+                replaying.set(true)
+                try {
+                    runCatching {
+                        Xp.callMethod(manager, "interceptKeyBeforeQueueing", key.event, interactive)
+                    }.onFailure(onError)
+                } finally {
+                    replaying.set(false)
+                }
+                if (index == keys.lastIndex) {
+                    report.event("轻捏 $pinches 次未形成手势 → 已交还小米")
+                }
+            }, key.arrivedAt - start)
         }
     }
 
@@ -266,13 +326,21 @@ internal class OffLaserGestures(
         synchronized(replayLock) {
             replayTask?.let(worker::removeCallbacks)
             replayTask = null
-            replayDown = null
-            replayUp = null
+            buffered.clear()
+            replayGeneration += 1
         }
     }
+
+    private class BufferedKey(val event: KeyEvent, val arrivedAt: Long)
 
     private companion object {
         const val FOUR_TAP_HOLD_MS = 650L
         const val VENDOR_REPLAY_GRACE_MS = 30L
+
+        /** Xiaomi's `mCurrentPinchFunction` value for the pinch shortcut panel. */
+        const val PINCH_FUNCTION_SHORTCUT_PANEL = 5
+
+        /** Enough for four pinches (DOWN + UP each). */
+        const val MAX_BUFFERED_KEYS = 8
     }
 }

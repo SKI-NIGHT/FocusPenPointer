@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      HAS_SIGNING: ${{ secrets.FOCUSPEN_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36.1 build-tools;36.1.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests and debug build
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Release build (signed)
+        if: env.HAS_SIGNING == 'true'
+        env:
+          FOCUSPEN_KEYSTORE_PASSWORD: ${{ secrets.FOCUSPEN_KEYSTORE_PASSWORD }}
+          FOCUSPEN_KEY_ALIAS: ${{ secrets.FOCUSPEN_KEY_ALIAS }}
+          FOCUSPEN_KEY_PASSWORD: ${{ secrets.FOCUSPEN_KEY_PASSWORD }}
+        run: |
+          echo "${{ secrets.FOCUSPEN_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+          export FOCUSPEN_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+          ./gradlew --no-daemon :app:assembleRelease
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Collect APKs
+        run: |
+          mkdir -p dist
+          version=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/FocusPenPointer-${version}-debug.apk"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk "dist/FocusPenPointer-${version}.apk"
+          fi
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FocusPenPointer-${{ github.sha }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          generate_release_notes: true

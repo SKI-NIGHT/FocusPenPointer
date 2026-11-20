@@ -67,6 +67,8 @@ FocusPen Pointer 是一个 LSPosed 模块，面向运行 **HyperOS 3–4** 的 R
 .\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
 ```
 
+每次推送都会由 GitHub Actions 运行单元测试并构建 APK（在 Actions 页面下载）；推送 `v*` 标签会自动发布 Release。正式签名需要在仓库 Secrets 中配置 `FOCUSPEN_KEYSTORE_BASE64`、`FOCUSPEN_KEYSTORE_PASSWORD`、`FOCUSPEN_KEY_ALIAS`、`FOCUSPEN_KEY_PASSWORD`，否则只产出 debug 包。
+
 debug 包支持**热重载**：模块已加载后，重新安装 debug APK 即可替换 system_server 里的逻辑，无需重启；只有 Hook 点变化时需要重启。正式签名：在项目根目录放置不纳入 Git 的 `keystore.properties`，执行 `.\gradlew.bat :app:assembleRelease`。
 
 ## English
@@ -122,6 +124,8 @@ Requires JDK 21, Android SDK Platform 36.1 and Build Tools 36.x.
 ```powershell
 .\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
 ```
+
+GitHub Actions runs the unit tests and builds the APKs on every push (download them from the Actions page); pushing a `v*` tag publishes a release. Signed release builds need the repository secrets `FOCUSPEN_KEYSTORE_BASE64`, `FOCUSPEN_KEYSTORE_PASSWORD`, `FOCUSPEN_KEY_ALIAS` and `FOCUSPEN_KEY_PASSWORD`; without them only the debug APK is built.
 
 Debug builds **hot-reload**: once the module is loaded, reinstalling the debug APK replaces the logic inside system_server without a reboot; only hook-point changes need one. For signed releases, provide an untracked `keystore.properties` and run `.\gradlew.bat :app:assembleRelease`.
 

@@ -16,6 +16,7 @@ FocusPen Pro X; configuration does not carry over.
 - **指针手感**：可调灵敏度和平滑（One Euro 滤波）。
 - **生效范围**：所有应用都生效，黑名单应用保持小米原版。
 - 激光关闭时的两连捏、四连捏全局动作和笔身滑动映射保留。
+- **激光关闭时不干扰小米的轻捏**：轻捏功能为“快捷面板”时，未形成手势的轻捏按原间隔全部交还小米（双捏不再丢失）；为其他功能（如切换笔刷/橡皮）时，轻捏立即以一次干净的按下抬起交给应用，捏住不放也只算一次。
 - 首次启动申请 HyperOS 的“获取应用列表”权限，授权后自动刷新。
 - 开发：Hook 拆成固定外壳 + 可替换模块，debug 包重装后热重载，无需重启。
 
@@ -29,6 +30,8 @@ FocusPen Pro X; configuration does not carry over.
 - **Pointer feel**: adjustable sensitivity and smoothing (One Euro filter).
 - **Scope**: every app except the blacklist.
 - Laser-off two/four-pinch global actions and pen-body swipe mappings are kept.
+- **Laser-off pinches leave Xiaomi's own pinch alone**: with the shortcut-panel function, pinches that form no gesture are all handed back with their original spacing (double pinches are no longer lost); with any other function (e.g. brush/eraser switch) the app gets one clean press-and-release at once, and a held pinch counts once.
+- GitHub Actions: unit tests and APK builds on every push; tagged releases publish the APKs.
 - Requests HyperOS's app-list permission on first launch and refreshes when granted.
 - Development: hooks split into a fixed shell and a reloadable module; debug builds hot-reload on reinstall.
 

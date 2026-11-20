@@ -22,6 +22,9 @@ internal class ActionExecutor(
         else -> true
     }
 
+    /** Injects a ready-made input event (e.g. a cleaned-up copy of a pen key). */
+    fun injectEvent(event: android.view.InputEvent): Boolean = injector.inject(event)
+
     /** Runs a one-shot action. */
     fun run(actionId: String): Boolean = when (GestureAction.fromId(actionId)) {
         GestureAction.CONSUME -> true
