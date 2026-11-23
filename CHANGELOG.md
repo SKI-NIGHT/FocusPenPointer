@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### 中文
+
+- **修复激光关闭时轻捏误点击**：不再注入轻捏副本（系统会把副本变成“确认键”，点击当前焦点控件，例如左上角菜单）。支持笔的应用（备忘录、StarNote、WPS 等）直接收到真实按键，捏住不放时的重复按键被丢弃；其他应用收不到轻捏。
+- **修复四连捏偶尔失效**。
+- **刚打开激光时的轻捏被忽略**（600ms 内），避免误点。
+- **远程桌面（如 UU 远程）指针方向和速度正确**：应用捕获鼠标时，按屏幕旋转修正方向并恢复速度；只在确实收到捕获数据时修正，未连接时不受影响。
+- 需要重启一次（外壳版本 5）。
+
+### English
+
+- **No more stray clicks from laser-off pinches**: pinch copies are no longer injected (Android turned them into DPAD_CENTER, clicking the focused view such as a top-left menu). Pen-aware apps (Notes, StarNote, WPS, …) get the real key with held-pinch repeats dropped; other apps get no pinch.
+- **Four-pinch no longer fails occasionally.**
+- **Pinches within 600 ms of turning the laser on are ignored.**
+- **Remote-desktop apps (e.g. UU Remote) get the right pointer direction and speed**: while an app captures the pointer, deltas are rotated for the display and rescaled; the correction applies only while captured data actually arrives, so a disconnected app is unaffected.
+- Needs one reboot (shell version 5).
+
 ## 0.1.0 - 2026-11-20
 
 First release of FocusPen Pointer as an independent project

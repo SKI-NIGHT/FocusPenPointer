@@ -38,9 +38,6 @@ internal class OffLaserGestures(
 
     private val replaying = AtomicBoolean(false)
     private val holdAwaitingRelease = AtomicBoolean(false)
-    /** Down times of the clean pinch copies we injected for the app. */
-    private val cleanTapDownTimes = ArrayDeque<Long>()
-
     private val replayLock = Any()
     private val buffered = ArrayList<BufferedKey>()
     private var replayInteractive = false
@@ -86,38 +83,32 @@ internal class OffLaserGestures(
     }
 
     /**
-     * When Xiaomi passes pinches on to the app (any function but the shortcut panel), a held
-     * pinch would reach it as a stream of key repeats and e.g. flip brush and eraser over and
-     * over. Instead the real key is swallowed and the app gets one clean press-and-release
-     * copy the moment the pinch goes down. Returns true when the real event is swallowed.
+     * When Xiaomi passes pinches on to the app (any function but the shortcut panel):
+     * pen-aware apps get the real key untouched (its repeats are dropped at dispatch, see
+     * FocusPenRuntime.shouldDropPenKeyRepeat). Other apps never see it: an unknown gamepad key
+     * makes Android fall back to DPAD_CENTER and click whatever has focus. Returns true when
+     * the real event is swallowed.
      */
-    private fun passToAppAsCleanTap(event: KeyEvent, snapshot: ModuleConfig): Boolean {
+    private fun swallowForApp(snapshot: ModuleConfig): Boolean {
         if (!snapshot.enabled || snapshot.blocksAllHooks(foreground()) || vendorShowsShortcutPanel()) {
             return false
         }
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            val now = android.os.SystemClock.uptimeMillis()
-            val down = KeyEvent(
-                now, now, KeyEvent.ACTION_DOWN, event.keyCode, 0, event.metaState,
-                event.deviceId, event.scanCode, event.flags, event.source,
-            )
-            val up = KeyEvent.changeAction(KeyEvent.changeTimeRepeat(down, now + 1, 0), KeyEvent.ACTION_UP)
-            synchronized(cleanTapDownTimes) {
-                cleanTapDownTimes.addLast(now)
-                while (cleanTapDownTimes.size > 4) cleanTapDownTimes.removeFirst()
-            }
-            // Inject outside this key callback.
-            worker.post {
-                if (!executor.injectEvent(down) || !executor.injectEvent(up)) {
-                    report.event("轻捏转交应用失败")
-                }
-            }
-        }
-        return true
+        return !appHandlesPinchKey(foreground())
     }
 
-    private fun isCleanTapCopy(event: KeyEvent): Boolean =
-        synchronized(cleanTapDownTimes) { event.downTime in cleanTapDownTimes }
+    /**
+     * Whether [packageName] uses the pinch key itself: Xiaomi's own pen apps, or apps that
+     * registered with Xiaomi for pen-body (touch film) events.
+     */
+    private fun appHandlesPinchKey(packageName: String?): Boolean {
+        packageName ?: return false
+        if (packageName in PEN_AWARE_APPS) return true
+        val manager = touchFilmManager.get() ?: return false
+        return runCatching {
+            (Xp.getObjectField(manager, "mSupportTouchFilmPackages") as? Collection<*>)
+                ?.contains(packageName) == true
+        }.getOrDefault(false)
+    }
 
     /**
      * Only the "shortcut panel" pinch function is handled by Xiaomi itself (it pops the
@@ -148,12 +139,11 @@ internal class OffLaserGestures(
         if (laserEnabled) return null
 
         if (event.scanCode == CompatProfile.SCAN_PINCH_F19) {
-            if (isCleanTapCopy(event)) return false
             if (!snapshot.enabled ||
                 (!globalGesturesEnabled(snapshot) && !normalGesturesEnabled(snapshot))
             ) {
                 detector.reset()
-                return passToAppAsCleanTap(event, snapshot)
+                return swallowForApp(snapshot)
             }
             when (event.action) {
                 KeyEvent.ACTION_DOWN ->
@@ -164,7 +154,7 @@ internal class OffLaserGestures(
                 }
             }
             // The shortcut-panel case is handled inside Xiaomi's hook (consumeVendorPinch).
-            return passToAppAsCleanTap(event, snapshot)
+            return swallowForApp(snapshot)
         }
 
         val up = event.keyCode == CompatProfile.KEY_SLIDE_UP
@@ -336,6 +326,15 @@ internal class OffLaserGestures(
     private companion object {
         const val FOUR_TAP_HOLD_MS = 650L
         const val VENDOR_REPLAY_GRACE_MS = 30L
+
+        /** Apps known to act on the pinch key themselves (brush/eraser switch etc.). */
+        val PEN_AWARE_APPS = setOf(
+            "com.miui.notes",
+            "com.miui.creation",
+            "com.miui.penengine",
+            "cn.wps.moffice_eng",
+            "cn.wps.moffice_eng.xiaomi.lite",
+        )
 
         /** Xiaomi's `mCurrentPinchFunction` value for the pinch shortcut panel. */
         const val PINCH_FUNCTION_SHORTCUT_PANEL = 5

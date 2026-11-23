@@ -75,6 +75,14 @@ internal class FocusPenModule(
             }
             HookPoints.TOUCH_FILM_FOCUS_CHANGED ->
                 ensureRuntime(param.thisObject)?.updateForeground(param.args.firstOrNull())
+            HookPoints.INPUT_INTERCEPT_DISPATCH -> {
+                val event = param.args.firstOrNull { it is KeyEvent } as? KeyEvent ?: return
+                if (event.repeatCount == 0 || !isFocusPenEvent(event)) return
+                if (runtime.get()?.shouldDropPenKeyRepeat(event) == true) {
+                    // InputManagerService contract: a negative delay drops the key.
+                    param.result = -1L
+                }
+            }
             HookPoints.TOUCH_FILM_INTERCEPT_KEY -> {
                 val event = param.args.firstOrNull() as? KeyEvent ?: return
                 if (!isFocusPenEvent(event)) return
@@ -115,6 +123,11 @@ internal class FocusPenModule(
                 runtime.get()?.onLaserPresentationHidden("turnoffvirtuallasershow", wasMouse)
             }
             HookPoints.VIEW_SET_POSITION -> onViewPosition(param)
+            HookPoints.INPUT_POINTER_CAPTURE ->
+                runtime.get()?.onPointerCaptureRequested(
+                    param.args.getOrNull(0) as? android.os.IBinder,
+                    (param.args.getOrNull(1) as? Int) ?: 0,
+                )
             HookPoints.LASER_SAFE_MARGIN -> {
                 // Xiaomi keeps the laser 8dp (~22px) inside the screen. Edge gestures (back,
                 // home, dock) start closer than that, so let the pointer reach the edge.

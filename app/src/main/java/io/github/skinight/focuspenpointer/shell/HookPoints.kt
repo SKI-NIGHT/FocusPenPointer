@@ -10,12 +10,13 @@ package io.github.skinight.focuspenpointer.shell
  * never installed. Such changes need a reboot.
  */
 object HookPoints {
-    const val SHELL_VERSION = 3
+    const val SHELL_VERSION = 5
 
     private const val TOUCH_FILM = "com.miui.server.input.stylus.MiuiStylusTouchFilmManager"
     private const val LASER = "com.miui.server.input.stylus.laser.LaserPointerController"
     private const val LASER_VIEW = "com.miui.server.input.stylus.laser.LaserView"
     private const val POLICY = "com.android.server.policy.MiuiPhoneWindowManager"
+    private const val INPUT_MANAGER = "com.android.server.input.InputManagerService"
 
     const val TOUCH_FILM_INIT = 0
     const val LASER_INIT = 1
@@ -35,6 +36,8 @@ object HookPoints {
     const val LASER_TURN_ON_LASER = 15
     const val LASER_TURN_OFF_LASER = 16
     const val LASER_SAFE_MARGIN = 17
+    const val INPUT_POINTER_CAPTURE = 18
+    const val INPUT_INTERCEPT_DISPATCH = 19
 
     /** [method] null means all constructors. */
     class Point(val id: Int, val className: String, val method: String?)
@@ -58,6 +61,8 @@ object HookPoints {
         Point(LASER_TURN_ON_LASER, LASER, "turnonvirtuallaser"),
         Point(LASER_TURN_OFF_LASER, LASER, "turnoffvirtuallaser"),
         Point(LASER_SAFE_MARGIN, LASER, "getLaserSafeMargin"),
+        Point(INPUT_POINTER_CAPTURE, INPUT_MANAGER, "requestPointerCapture"),
+        Point(INPUT_INTERCEPT_DISPATCH, INPUT_MANAGER, "interceptKeyBeforeDispatching"),
     )
 }
 

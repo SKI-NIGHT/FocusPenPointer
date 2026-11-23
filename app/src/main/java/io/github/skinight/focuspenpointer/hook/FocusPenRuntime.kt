@@ -5,10 +5,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.display.DisplayManager
 import android.os.Handler
+import android.os.IBinder
 import android.os.HandlerThread
 import android.os.SystemClock
+import android.view.Display
 import android.view.InputDevice
+import android.view.Surface
 import android.view.KeyEvent
 import android.view.MotionEvent
 import io.github.skinight.focuspenpointer.BuildConfig
@@ -109,6 +113,7 @@ internal class FocusPenRuntime(
         },
         listener = object : LaserSession.Listener {
             override fun onLaserChanged(enabled: Boolean, source: String) {
+                laserOnAt = if (enabled) SystemClock.uptimeMillis() else 0L
                 cancelInteraction("激光状态变化")
                 reporter.event("虚拟激光=${if (enabled) "开启" else "关闭"} ($source)")
                 synchronizeCursor()
@@ -173,6 +178,37 @@ internal class FocusPenRuntime(
 
     @Volatile
     private var pressOffsetY = 0f
+
+    /** Window that holds pointer capture (remote-desktop apps etc.), or null. */
+    @Volatile
+    private var captureToken: IBinder? = null
+
+    /** IWindow binder of the focused window, to tell whether the capturing window is focused. */
+    @Volatile
+    private var focusedWindowToken: IBinder? = null
+
+    /** Package that requested pointer capture. */
+    @Volatile
+    private var capturePackage: String? = null
+
+    /** Last verdict of [sampleIsCaptured], for samples that fit both paths. */
+    @Volatile
+    private var rawStream = false
+    private var rawRun = 0
+
+    private val defaultDisplay by lazy {
+        runCatching {
+            context.getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)
+        }.getOrNull()
+    }
+
+    /** When the laser last turned on; pinches right after it belong to the turn-on gesture. */
+    @Volatile
+    private var laserOnAt = 0L
+
+    /** Down time of a pinch swallowed by that guard, so its repeats and UP are too. */
+    @Volatile
+    private var swallowedPinchDownTime = Long.MIN_VALUE
 
     /** Until when pen motion after a release (its spring-back) is ignored. */
     @Volatile
@@ -257,6 +293,10 @@ internal class FocusPenRuntime(
     fun updateLaser(enabled: Boolean, source: String) = laser.onVendorState(enabled, source)
 
     fun updateForeground(windowState: Any?) {
+        // Apps request capture with their window's input token (ViewRootImpl.getInputToken).
+        focusedWindowToken = windowState?.let {
+            runCatching { Xp.getObjectField(it, "mInputChannelToken") as? IBinder }.getOrNull()
+        }
         val next = extractPackage(windowState)
         if (next == null && foreground.get() != null) {
             // Transient windows report no owner; only accept "unknown" if it persists.
@@ -310,6 +350,70 @@ internal class FocusPenRuntime(
     fun shouldSuppressVendorDrawing(): Boolean =
         pointerActive() && (press.isTracking || touch.isTouching)
 
+    /** An app requested (mode != 0) or released pointer capture for its window. */
+    fun onPointerCaptureRequested(token: IBinder?, mode: Int) {
+        if (mode != 0) {
+            captureToken = token
+            capturePackage = foreground.get()
+        } else if (token == null || token == captureToken) {
+            captureToken = null
+            capturePackage = null
+        }
+        reporter.event(
+            "指针捕获${if (mode != 0) "开启" else "关闭"}（mode=$mode，前台=${foreground.get() ?: "未知"}，" +
+                "窗口匹配=${token != null && token == focusedWindowToken}）",
+        )
+    }
+
+    /**
+     * Whether this sample came in raw (pointer capture) rather than through Xiaomi's normal
+     * path. The window token alone is not enough: capture-heavy apps re-request it every few
+     * seconds and focus flickers meanwhile, while the raw stream goes on. So among apps that
+     * requested capture, the data decides: Xiaomi's path delivers multiples of 2.8 (fractions),
+     * capture delivers whole counts. Values that fit both (0, 14, 28 …) keep the last verdict;
+     * any fraction ends a raw stream at once, while starting one takes a short run of wholes.
+     */
+    private fun sampleIsCaptured(dx: Float, dy: Float): Boolean {
+        val owner = capturePackage
+        if (owner == null || owner != foreground.get()) {
+            rawStream = false
+            rawRun = 0
+            return false
+        }
+        when {
+            !isWhole(dx) || !isWhole(dy) -> {
+                rawRun = 0
+                rawStream = false
+            }
+            isAmbiguous(dx) && isAmbiguous(dy) -> Unit
+            // Xiaomi's acceleration occasionally lands on whole numbers too (e.g. 44.0,-11.0):
+            // only a run of them means raw counts.
+            ++rawRun >= RAW_RUN_TO_SWITCH -> rawStream = true
+        }
+        return rawStream
+    }
+
+    private fun isWhole(value: Float) = kotlin.math.abs(value - kotlin.math.round(value)) < 0.01f
+
+    /** A whole value Xiaomi's path can produce too: a multiple of 14 (= 5 × 2.8). */
+    private fun isAmbiguous(value: Float) = kotlin.math.round(value).toInt() % 14 == 0
+
+    /**
+     * Under pointer capture the laser is fed the pen's raw counts: neither rotated with the
+     * screen nor scaled (measured at 90°: drawn motion turned 90° counter-clockwise, and
+     * integer counts instead of multiples of 2.8). Put both back.
+     */
+    private fun correctCapturedDelta(dx: Float, dy: Float): Pair<Float, Float> {
+        val rotation = defaultDisplay?.rotation ?: Surface.ROTATION_0
+        val (x, y) = when (rotation) {
+            Surface.ROTATION_90 -> -dy to dx
+            Surface.ROTATION_180 -> -dx to -dy
+            Surface.ROTATION_270 -> dy to -dx
+            else -> dx to dy
+        }
+        return x * CAPTURED_COUNT_SCALE to y * CAPTURED_COUNT_SCALE
+    }
+
     /**
      * Shapes one `LaserPointerController.move` sample. Returns null to leave it untouched.
      */
@@ -318,12 +422,14 @@ internal class FocusPenRuntime(
             Xp.log("FocusPenPointer: pointer motion hook active (LaserPointerController.move)")
         }
         if (!pointerActive()) return null
+        val captured = sampleIsCaptured(dx, dy)
+        val (inX, inY) = if (captured) correctCapturedDelta(dx, dy) else dx to dy
         val snapshot = config.snapshot.get()
         val settings = PointerMotionFilter.Settings(
             sensitivity = snapshot.pointerSensitivity / 100f,
             smoothing = if (press.wantsUnsmoothedMotion) 0f else snapshot.pointerSmoothing / 100f,
         )
-        val (shapedX, shapedY) = pointerFilter.shape(dx, dy, settings)
+        val (shapedX, shapedY) = pointerFilter.shape(inX, inY, settings)
             ?: return PointerMotionFilter.Result.Drop
         if (!press.isTracking && SystemClock.uptimeMillis() < releaseSettleUntil) {
             // The pen is springing back from the release: keep the pointer where it was.
@@ -332,7 +438,10 @@ internal class FocusPenRuntime(
             return PointerMotionFilter.Result.Drop
         }
         val decision = press.onMotion(shapedX)
-        trace { "M raw=${f1(dx)},${f1(dy)} out=${f1(shapedX)},${f1(shapedY)} $decision" }
+        trace {
+            "M raw=${f1(dx)},${f1(dy)} out=${f1(shapedX)},${f1(shapedY)} $decision" +
+                if (captured) " CAPTURED" else ""
+        }
         if (decision == PressTracker.Motion.HOLD) {
             pointerFilter.resetSmoothing()
             return PointerMotionFilter.Result.Drop
@@ -470,6 +579,16 @@ internal class FocusPenRuntime(
         }
     }
 
+    /**
+     * Key repeats of a held pinch, on their way to an app. Pen apps would act on every repeat
+     * (e.g. flip brush and eraser over and over); one press is one action.
+     */
+    fun shouldDropPenKeyRepeat(event: KeyEvent): Boolean {
+        if (circuitOpen.get() || event.scanCode != CompatProfile.SCAN_PINCH_F19) return false
+        val snapshot = config.snapshot.get()
+        return snapshot.enabled && !snapshot.blocksAllHooks(foreground.get())
+    }
+
     fun shouldConsumeVendorOffLaserPinch(event: KeyEvent, interactive: Boolean): Boolean {
         if (circuitOpen.get()) return false
         return try {
@@ -514,6 +633,14 @@ internal class FocusPenRuntime(
 
     private fun interceptMousePinchKey(event: KeyEvent): Boolean = when (event.action) {
         KeyEvent.ACTION_DOWN -> when {
+            event.repeatCount == 0 && !press.isTracking &&
+                SystemClock.uptimeMillis() - laserOnAt < LASER_ON_PINCH_GUARD_MS -> {
+                // Still part of the pinches that turned the laser on: no tap.
+                swallowedPinchDownTime = event.downTime
+                trace { "PRESS swallowed (laser just turned on)" }
+                true
+            }
+            event.repeatCount > 0 && event.downTime == swallowedPinchDownTime -> true
             event.repeatCount > 0 -> {
                 if (touch.isTouching) touch.refreshWatchdog()
                 press.isTracking
@@ -525,11 +652,16 @@ internal class FocusPenRuntime(
                 true
             }
         }
-        KeyEvent.ACTION_UP -> if (press.isTracking) {
-            press.onPinchUp()
-            true
-        } else {
-            false
+        KeyEvent.ACTION_UP -> when {
+            event.downTime == swallowedPinchDownTime -> {
+                swallowedPinchDownTime = Long.MIN_VALUE
+                true
+            }
+            press.isTracking -> {
+                press.onPinchUp()
+                true
+            }
+            else -> false
         }
         else -> false
     }
@@ -733,6 +865,18 @@ internal class FocusPenRuntime(
          * pointer ~30 px (up to 200 px) in the first 80 ms.
          */
         const val RELEASE_SETTLE_MS = 100L
+
+        /**
+         * Pinches this soon after the laser turns on are leftovers of the multi-pinch that
+         * turned it on (measured: extra pinches 80–530 ms later became taps).
+         */
+        const val LASER_ON_PINCH_GUARD_MS = 600L
+
+        /** Whole-number samples in a row that mark a raw (captured) stream. */
+        const val RAW_RUN_TO_SWITCH = 3
+
+        /** Pixels per raw pen count on Xiaomi's normal (uncaptured) path. */
+        const val CAPTURED_COUNT_SCALE = 2.8f
 
         const val DEBUG_POSTURE_ACTION = "io.github.skinight.focuspenpointer.DEBUG_POSTURE"
         const val TOUCH_FILM_CLASS = "com.miui.server.input.stylus.MiuiStylusTouchFilmManager"
